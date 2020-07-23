@@ -1,25 +1,33 @@
 import os
 import asyncio
+from enum import Enum
 from itertools import chain
-from tqdm import tqdm
 import requests
+from tqdm import tqdm
 
 BASE_URL = "https://discord.com/api"
 ME_USERS_URL = f"{BASE_URL}/users/@me"
 ME_USERS_GUILDS_URL = f"{BASE_URL}/users/@me/guilds"
+ME_USERS_CHANNELS_URL = f"{BASE_URL}/users/@me/channels"
+
+
+class ChatKind(Enum):
+    Channel = "channels"
+    Guild = "guilds"
 
 
 async def search_messages(
         session: requests.Session,
-        guild: dict,
+        chat: dict,
         user: dict,
         params: dict = {},
 ):
-    guild_id = guild["id"]
+    chat_id = chat["id"]
+    chat_kind = chat["kind"].value
     user_id = user["id"]
 
     params = {**params, "author_id": user_id}
-    path = f"guilds/{guild_id}/messages/search"
+    path = f"{chat_kind}/{chat_id}/messages/search"
 
     while True:
         resp = session.get(
@@ -37,15 +45,14 @@ async def search_messages(
 
 async def search_messages_worker(
         session: requests.Session,
-        guild: dict,
+        chat: dict,
         user: dict,
         queue: asyncio.Queue,
         params: dict = {},
 ):
-
     params = {}
     while True:
-        result = await search_messages(session, guild, user, params)
+        result = await search_messages(session, chat, user, params)
         total = result["total_results"]
         messages = result["messages"]
 
@@ -114,19 +121,42 @@ async def main():
     session = requests.Session()
     session.headers.update({"AUTHORIZATION": token})
 
-    resp = session.get(f"{BASE_URL}/users/@me")
+    resp = session.get(ME_USERS_URL)
     if resp.status_code == 403 or resp.status_code == 401:
         raise Exception("user not authorized. invalid token.")
 
     user = resp.json()
-    guilds = session.get(f"{BASE_URL}/users/@me/guilds").json()
+    guilds = session.get(ME_USERS_GUILDS_URL).json()
+    channels = session.get(ME_USERS_CHANNELS_URL).json()
 
-    messages_queue = asyncio.Queue()
+    channels = [
+        {**channel, "kind": ChatKind.Channel}
+        for channel in channels
+    ]
 
-    # get the sum of all messages
+    guilds = [
+        {**guild, "kind": ChatKind.Guild}
+        for guild in guilds
+    ]
+
+    chats = channels + guilds
+
+    print("searching your messages... this could take a few moments...")
     total_messages = 0
-    for guild in guilds:
-        result = await search_messages(session, guild, user)
+    for chat in chats:
+        if chat["kind"] == ChatKind.Channel:
+            recipients = [
+                recipient["username"]
+                for recipient in chat["recipients"]
+                if recipient["id"] != user["id"]
+            ]
+            print("{}: {}".format(
+                chat["id"],
+                ", ".join(recipients)))
+        else:
+            print("{}: {}".format(chat["id"], chat["name"]))
+
+        result = await search_messages(session, chat, user)
         total_messages += result["total_results"]
 
     if total_messages == 0:
@@ -136,10 +166,11 @@ async def main():
     pbar = tqdm(total=total_messages)
     messages_queue = asyncio.Queue()
 
+    print("starting to delete messages... this could take a LOT of time!")
     producers = [
         asyncio.create_task(
-            search_messages_worker(session, guild, user, messages_queue))
-        for guild in guilds
+            search_messages_worker(session, chat, user, messages_queue))
+        for chat in chats
     ]
 
     consumer = asyncio.create_task(
