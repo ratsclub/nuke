@@ -195,7 +195,7 @@ async def main():
 
     chats = channels + guilds
 
-    print("searching your messages... this could take a few moments...")
+    print("calculating how many messages you have. this could take a few moments...")
     total_messages = 0
     with tqdm(total=len(chats)) as pbar:
         for chat in chats:

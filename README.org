@@ -2,6 +2,14 @@
 
 A tool to help you delete your [[https://discord.com][Discord]] messages.
 
+* Table of Contents
+- [[#nuke][nuke]]
+- [[#usage][Usage]]
+- [[#installation][Installation]]
+  - [[#nix-users][Nix users]]
+  - [[#other-platforms][Other Platforms]]
+- [[#output][Output]]
+
 * Usage
 
 #+BEGIN_EXAMPLE
