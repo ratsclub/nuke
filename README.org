@@ -1,0 +1,47 @@
+* nuke
+
+A tool to help you delete your [[https://discord.com][Discord]] messages.
+
+* Usage
+
+#+BEGIN_EXAMPLE
+    usage: nuke [-h] [--log FILE] [--token TOKEN]
+
+    A program to delete all your discord messages
+
+    optional arguments:
+      -h, --help     show this help message and exit
+      --log FILE     location to save log file (default: ./nuke.log)
+      --token TOKEN  your discord account token
+
+    Author: github.com/ratsclub <freire.victor@tuta.io>
+#+END_EXAMPLE
+
+* Installation
+
+** Nix users
+
+#+BEGIN_EXAMPLE
+    git clone https://github.com/ratsclub/nuke.github
+    cd nuke
+    nix-shell
+    python3 main.py --token YOUR_TOKEN --log YOUR_FILE
+#+END_EXAMPLE
+
+** Other Platforms
+
+#+BEGIN_EXAMPLE
+    git clone https://github.com/ratsclub/nuke.github
+    cd nuke
+    pip3 install -r requirements.txt
+    python3 main.py --token YOUR_TOKEN --log YOUR_FILE
+#+END_EXAMPLE
+
+* Output
+
+#+BEGIN_EXAMPLE
+    searching your messages... this could take a few moments...
+100%|███████████████████████████████████████████| 47/47 [00:47<00:00,  3.21it/s]
+starting to delete messages... this could take a LOT of time!
+  1%|█                                          | 133/9608 [00:00<?, 5.88it/s]
+#+END_EXAMPLE
