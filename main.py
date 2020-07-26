@@ -32,7 +32,7 @@ stream_handler = logging.StreamHandler(stream=None)
 stream_handler.setLevel(logging.ERROR)
 # formatter
 formatter = logging.Formatter(
-    "[%(levelname)s] %(funcName)s, %(asctime)s:  %(message)s",
+    "level=%(levelname)s msg=$(message)s at=%(funcName)s when=%(asctime)s",
     "%Y-%m-%d %H:%M:%S")
 file_handler.setFormatter(formatter)
 stream_handler.setFormatter(formatter)
@@ -40,11 +40,12 @@ stream_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 logger.addHandler(stream_handler)
 
-BASE_URL = "https://discord.com/api"
-ME_USERS_URL = f"{BASE_URL}/users/@me"
-ME_USERS_GUILDS_URL = f"{BASE_URL}/users/@me/guilds"
-ME_USERS_CHANNELS_URL = f"{BASE_URL}/users/@me/channels"
-
+URL_BASE = "https://discord.com/api"
+URL_USERS_ME = "{}/users/@me".format(URL_BASE)
+URL_USERS_GUILDS = "{}/users/@me/guilds".format(URL_BASE)
+URL_USERS_CHANNELS = "{}/users/@me/channels".format(URL_BASE)
+URL_SEARCH_PAGE = "{}/{}/{}/messages/search"
+URL_DELETE_MESSAGE = "{}/channels/{}/messages/{}"
 
 class ChatKind(Enum):
     Channel = "channels"
@@ -58,61 +59,77 @@ async def search_messages(
         params: dict = {},
 ):
     chat_id = chat["id"]
-    chat_kind = chat["kind"].value
+    chat_kind = chat["kind"]
     user_id = user["id"]
 
-    log_str = f"| {chat_kind[:-1]} {chat_id} | params {params} |"
-    logger.info(log_str)
-
-    params = {**params, "author_id": user_id}
-    path = f"{chat_kind}/{chat_id}/messages/search"
+    params = {**params, "author_id": user_id, "include_nsfw": True}
 
     while True:
         resp = session.get(
-            f"{BASE_URL}/{path}",
+            URL_SEARCH_PAGE
+            .format(URL_BASE, chat_kind, chat_id),
             params=params
+        )
+
+        logger.info(
+            "search on {} {} params={}"
+            .format(chat_kind, chat_id, params)
         )
 
         if resp.status_code == 429:
             retry_after = resp.json()["retry_after"]
-            logger.info(f"rate limit {retry_after}ms {log_str}")
+            logger.warning(
+                "rate limited on {} {} - {}ms"
+                .format(chat_kind[:-1], chat_id, retry_after)
+            )
             await asyncio.sleep(retry_after / 1000)
             continue
 
-        return resp.json()
+        result = resp.json()
+        total_results = result["total_results"]
+
+        if total_results == 0:
+            return result
+
+        # a message must be of type 0 to be deletable
+        messages = result["messages"]
+        messages = [
+            msg for msg in chain(*messages)
+            if "hit" in msg and msg["type"] == 0
+        ]
+
+        # it means that the page does not have deletable messages
+        if len(messages) == 0:
+            result["total_results"] = 0
+
+        result["messages"] = messages
+
+        return result
 
 
 async def search_messages_worker(
         session: requests.Session,
         chat: dict,
         user: dict,
-        queue: asyncio.Queue,
+        pbar: tqdm,
         params: dict = {},
 ):
     params = {}
-    chat_kind = chat["kind"].value
+    chat_kind = chat["kind"]
     chat_id = chat["id"]
 
     while True:
         result = await search_messages(session, chat, user, params)
-        total = result["total_results"]
+        total_results = result["total_results"]
         messages = result["messages"]
 
         # no messages left
-        if total == 0:
-            logger.info(f"done on {chat_kind} {chat_id}!")
+        if total_results == 0:
+            logger.info(
+                "done on {} {}"
+                .format(chat_kind, chat_id)
+            )
             return
-
-        # getting my own messages
-        messages = [msg for msg in chain(*messages) if "hit" in msg]
-
-        # sending messages to queue
-        for msg in messages:
-            await queue.put({
-                "id": msg["id"],
-                "channel": msg["channel_id"],
-                "kind": chat_kind
-            })
 
         # getting the oldest id
         ids = [msg["id"] for msg in messages]
@@ -120,6 +137,17 @@ async def search_messages_worker(
 
         # next search will begin from the previous oldest id
         params = {**params, "max_id": max_id}
+
+        messages_tasks = [
+            asyncio.create_task(delete_message(session, pbar, {
+                "id": msg["id"],
+                "channel": msg["channel_id"],
+                "kind": chat_kind
+            }))
+            for msg in messages
+        ]
+
+        await asyncio.gather(*messages_tasks)
 
 
 async def delete_message(
@@ -129,37 +157,28 @@ async def delete_message(
 ):
     channel_id = message["channel"]
     message_id = message["id"]
-    chat_kind = message["kind"]
-
-    log_str = f"| message {message_id} | {chat_kind[:-1]} {channel_id} |"
 
     while True:
-        path = f"channels/{channel_id}/messages/{message_id}"
-        resp = session.delete(f"{BASE_URL}/{path}")
+        resp = session.delete(
+            URL_DELETE_MESSAGE
+            .format(URL_BASE, channel_id, message_id)
+        )
 
         if resp.status_code == 429:
             retry_after = resp.json()["retry_after"]
-            logger.info(f"rate limit {retry_after}ms {log_str}")
+            logger.warning(
+                "rate limited on channel {} message {} - {}ms"
+                .format(channel_id, message_id, retry_after)
+            )
             await asyncio.sleep(retry_after / 1000)
             continue
 
         if resp.status_code == 404:
             return
 
-        logger.info(f"deleted {log_str}")
-        pbar.update(1)
-        return
-
-
-async def delete_message_consumer(
-        session: requests.Session,
-        pbar: tqdm,
-        queue: asyncio.Queue,
-):
-    while True:
-        message = await queue.get()
-        await delete_message(session, pbar, message)
-        queue.task_done()
+        if resp.status_code == 204:
+            pbar.update(1)
+            return
 
 
 async def main():
@@ -175,57 +194,63 @@ async def main():
     session = requests.Session()
     session.headers.update({"AUTHORIZATION": token})
 
-    resp = session.get(ME_USERS_URL)
+    resp = session.get(URL_USERS_ME)
     if resp.status_code == 403 or resp.status_code == 401:
         raise Exception("user not authorized. invalid token.")
 
     user = resp.json()
-    guilds = session.get(ME_USERS_GUILDS_URL).json()
-    channels = session.get(ME_USERS_CHANNELS_URL).json()
+    guilds = session.get(URL_USERS_GUILDS).json()
+    channels = session.get(URL_USERS_CHANNELS).json()
 
     channels = [
-        {**channel, "kind": ChatKind.Channel}
+        {**channel, "kind": ChatKind.Channel.value}
         for channel in channels
     ]
 
     guilds = [
-        {**guild, "kind": ChatKind.Guild}
+        {**guild, "kind": ChatKind.Guild.value}
         for guild in guilds
     ]
 
-    chats = channels + guilds
+    tmp_chats = channels + guilds
+    pbar = tqdm(total=len(tmp_chats))
+    pbar.set_description("counting messages")
 
-    print("calculating how many messages you have. this could take a few moments...")
+    # FIXME use only one list, don't make another copy
+    chats = []
     total_messages = 0
-    with tqdm(total=len(chats)) as pbar:
-        for chat in chats:
-            result = await search_messages(session, chat, user)
-            total_messages += result["total_results"]
+    for chat in tmp_chats:
+        result = await search_messages(session, chat, user)
+
+        total_results = result["total_results"]
+
+        # don't search again if it has no messages
+        if total_results == 0:
             pbar.update(1)
+            continue
+
+        total_messages += total_results
+        chats.append(chat)
+
+        pbar.update(1)
 
     if total_messages == 0:
+        pbar.close()
         print("you don't have any messages left")
         return
 
-    print("starting to delete messages... this could take a LOT of time!")
-
     tasks = []
-    queue = asyncio.Queue()
-    pbar = tqdm(total=total_messages)
-
-    # FIXME this task is taking too long to start deleting messages
-    tasks.append(asyncio.create_task(
-        delete_message_consumer(session, pbar, queue)))
-
-    tasks.extend([
+    pbar.reset()
+    pbar.total = total_messages
+    pbar.set_description("deleting")
+    tasks = [
         asyncio.create_task(
-            search_messages_worker(session, chat, user, queue))
+            search_messages_worker(session, chat, user, pbar))
         for chat in chats
-    ])
+    ]
 
     await asyncio.gather(*tasks)
-    await queue.join()
+    pbar.set_description("Done!")
     pbar.close()
-    print(f"Deleted {total_messages} messages!")
 
 asyncio.run(main())
