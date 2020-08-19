@@ -87,7 +87,7 @@ async def search_messages(
 
         result = resp.json()
         if "total_results" not in result:
-            return search_messages(session, chat, user, params)
+            return await search_messages(session, chat, user, params)
 
         total_results = result["total_results"]
 
